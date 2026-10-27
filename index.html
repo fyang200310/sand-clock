@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sand Clock</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Jost:wght@300;400&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #ecebe7;
+      --ink-soft: rgba(236, 235, 231, 0.55);
+      --ink-faint: rgba(236, 235, 231, 0.30);
+    }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden;
+      background: #000;
+      color: var(--ink);
+      font-family: 'Jost', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      user-select: none; -webkit-user-select: none;
+    }
+    canvas#scene {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      display: block; cursor: grab; touch-action: none;
+    }
+    canvas#scene.dragging { cursor: grabbing; }
+
+    #ui { position: fixed; inset: 0; pointer-events: none; }
+    header {
+      position: absolute; top: 24px; left: 28px; right: 28px;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    }
+    .mark { font-weight: 400; font-size: 12px; letter-spacing: 0.42em; color: var(--ink-soft); }
+    nav { display: flex; gap: 6px; pointer-events: auto; }
+    button {
+      font: inherit; font-size: 11px; letter-spacing: 0.3em;
+      background: none; border: none; color: var(--ink-faint);
+      padding: 6px 4px 6px 8px; cursor: pointer;
+      border-bottom: 1px solid transparent; transition: color .4s, border-color .4s;
+    }
+    button:hover { color: var(--ink-soft); }
+    button.on { color: var(--ink); border-color: var(--ink); }
+
+    footer {
+      position: absolute; left: 0; right: 0; bottom: 26px;
+      display: flex; flex-direction: column; align-items: center; gap: 10px;
+      padding: 0 16px;
+    }
+    #date {
+      font-family: 'Cormorant Garamond', serif; font-weight: 500;
+      font-size: 22px; letter-spacing: 0.18em; text-align: center;
+    }
+    #time {
+      font-family: 'Cormorant Garamond', serif; font-weight: 500;
+      font-size: 17px; letter-spacing: 0.32em; color: var(--ink-soft);
+      font-variant-numeric: tabular-nums; margin-top: -4px;
+    }
+    #place { font-size: 11px; letter-spacing: 0.32em; color: var(--ink-soft); text-align: center; }
+    .fade { transition: opacity .45s ease; }
+    .fade.out { opacity: 0; }
+    #cities { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 18px; pointer-events: auto; margin-top: 4px; }
+    #hint { font-size: 10px; letter-spacing: 0.28em; color: var(--ink-faint); text-align: center; }
+    #nogl {
+      position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      font-size: 14px; letter-spacing: 0.1em; color: var(--ink-soft); text-align: center; padding: 24px;
+    }
+    @media (max-width: 560px) {
+      #date { font-size: 18px; }
+      button { font-size: 10px; letter-spacing: 0.22em; }
+      #hint { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="ui">
+    <header>
+      <span class="mark">SAND CLOCK</span>
+    </header>
+    <footer>
+      <div id="date" class="fade"></div>
+      <div id="time"></div>
+      <div id="place" class="fade"></div>
+      <div id="cities"></div>
+      <div id="hint">DRAG TO TURN THE TRAY · TURN IT OVER TO POUR THE SAND · DOUBLE-CLICK TO SET IT BACK</div>
+    </footer>
+  </div>
+  <div id="nogl">This piece needs WebGL 2. Please open it in a recent Chrome, Edge, Firefox or Safari.</div>
+
+  <script>
+// ============================================================
+//  SAND CLOCK · a 3D zen garden clock
+//  Week 6 · Clock Extension
+//
+//  - Black background, pale grey tray, white sand. The sand is a real
+//    3D height surface lit by soft daylight.
+//  - Hour and minute hands are two thin needles.
+//  - The second hand is a long straight blade that reaches the rim.
+//    It slowly pushes a pile of sand around the whole tray; grains
+//    tumble off the front of the pile.
+//  - The clock face is printed in the sand, but it is hidden under loose
+//    sand. Only where the blade has just pushed the sand away do the
+//    numbers show; over the next minute the sand slowly covers them again.
+//  - The current hour, minute and second are set in BLACK SAND.
+//  - Drag the tray to turn it. Turn it upside down and the sand pours out
+//    and drifts slowly through the air; turn it back and sand falls from
+//    the sky to fill it again.
+//  - Date + timezones: Local, New York, Los Angeles, Tokyo, London, Sydney.
+//
+//  Plain WebGL 2, no libraries. Classes: TimeKeeper, DialFace, Hands,
+//  GrainField, TrayControl, Camera, ShaderProgram, Mesh, Geometry, SandClock.
+// ============================================================
+
+'use strict';
+
+const TAU = Math.PI * 2;
+const SAND_R = 0.948;       // sand radius (tray inner wall)
+const BLADE_L = 0.932;      // the second-hand blade reaches the rim
+const DIAL_R = 0.95;        // the dial texture covers [-DIAL_R, DIAL_R]
+const HOUR_R = 0.56, HOUR_SIZE = 0.105;    // ring of hour numbers
+const MIN_R = 0.83, MIN_SIZE = 0.040;      // ring of minute / second numbers
+const TOOTH = 0.04;         // spacing of the little teeth under the second hand
+const FULL_GRAINS = 9000;   // how many falling grains equal one full tray
+
+const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+const CITIES = [
+  { name: 'LOCAL',       tz: LOCAL_TZ },
+  { name: 'NEW YORK',    tz: 'America/New_York' },
+  { name: 'LOS ANGELES', tz: 'America/Los_Angeles' },
+  { name: 'TOKYO',       tz: 'Asia/Tokyo' },
+  { name: 'BEIJING',     tz: 'Asia/Shanghai' },
+  { name: 'LONDON',      tz: 'Europe/London' },
+  { name: 'PARIS',       tz: 'Europe/Paris' },
+];
+
+// Time zone IDs are named after one city per zone; show the name people expect.
+const ZONE_NAMES = {
+  'Asia/Shanghai': 'BEIJING', 'Asia/Chongqing': 'BEIJING', 'Asia/Harbin': 'BEIJING',
+  'Asia/Calcutta': 'KOLKATA', 'Asia/Kolkata': 'KOLKATA', 'Asia/Saigon': 'HO CHI MINH CITY',
+  'Asia/Ho_Chi_Minh': 'HO CHI MINH CITY', 'Europe/Kiev': 'KYIV', 'Asia/Katmandu': 'KATHMANDU',
+  'Asia/Rangoon': 'YANGON', 'Etc/UTC': 'UTC', 'UTC': 'UTC',
+};
+
+const LIGHT = normalize3([-0.45, 0.68, -0.38]);   // soft daylight from the upper left
+
+// ------------------------------------------------------------
+//  Math helpers (column-major 4x4 matrices, like WebGL expects)
+// ------------------------------------------------------------
+function normalize3(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
+function wrapPI(a) { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; }
+function wrapTau(a) { a %= TAU; return a < 0 ? a + TAU : a; }
+function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+function smoothstep(a, b, x) { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); }
+function easeFactor(rate, k) { return 1 - Math.pow(1 - rate, k); }   // frame-rate independent easing
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+const M4 = {
+  mul(a, b) {
+    const o = new Float32Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+      o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+    }
+    return o;
+  },
+  translate(x, y, z) { return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1]); },
+  scale(x, y, z) { return new Float32Array([x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1]); },
+  rotX(t) { const c = Math.cos(t), s = Math.sin(t); return new Float32Array([1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]); },
+  // rotY(t) moves a point at clock angle phi to phi - t (angles clockwise from 12, seen from above)
+  rotY(t) { const c = Math.cos(t), s = Math.sin(t); return new Float32Array([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]); },
+  perspective(fovy, aspect, near, far) {
+    const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    return new Float32Array([f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0]);
+  },
+  lookAt(eye, target, up) {
+    let zx = eye[0] - target[0], zy = eye[1] - target[1], zz = eye[2] - target[2];
+    let l = Math.hypot(zx, zy, zz); zx /= l; zy /= l; zz /= l;
+    let xx = up[1] * zz - up[2] * zy, xy = up[2] * zx - up[0] * zz, xz = up[0] * zy - up[1] * zx;
+    l = Math.hypot(xx, xy, xz); xx /= l; xy /= l; xz /= l;
+    const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+    return new Float32Array([
+      xx, yx, zx, 0, xy, yy, zy, 0, xz, yz, zz, 0,
+      -(xx * eye[0] + xy * eye[1] + xz * eye[2]),
+      -(yx * eye[0] + yy * eye[1] + yz * eye[2]),
+      -(zx * eye[0] + zy * eye[1] + zz * eye[2]), 1,
+    ]);
+  },
+  // apply a rigid transform (rotation + translation) to a point, or undo it
+  apply(m, p) { return [m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13], m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]]; },
+  applyInvRigid(m, p) {
+    const x = p[0] - m[12], y = p[1] - m[13], z = p[2] - m[14];
+    return [m[0] * x + m[1] * y + m[2] * z, m[4] * x + m[5] * y + m[6] * z, m[8] * x + m[9] * y + m[10] * z];
+  },
+  invRotDir(m, d) { return [m[0] * d[0] + m[1] * d[1] + m[2] * d[2], m[4] * d[0] + m[5] * d[1] + m[6] * d[2], m[8] * d[0] + m[9] * d[1] + m[10] * d[2]]; },
+};
+
+// ------------------------------------------------------------
+//  GLSL shared by the sand surface and the pile grains.
+//  Everything here is in the tray's own (local) space.
+//  Angles are clockwise from 12 o'clock, seen from above.
+// ------------------------------------------------------------
+const GLSL_COMMON = `
+#define TAU 6.28318530718
+#define PI  3.14159265359
+const float BLADE_L = ${BLADE_L.toFixed(4)};
+const float TOOTH = ${TOOTH.toFixed(4)};
+uniform float uTime;
+uniform float uSecA;      // second-hand (blade) angle
+uniform float uPattern;   // 0 = loose poured sand, 1 = settled tray
+uniform float uLevel;     // the sand surface sinks as the tray empties
+
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash12(i), hash12(i + vec2(1, 0)), u.x),
+             mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), u.x), u.y);
+}
+float wrapPI(float a) { return mod(a + PI, TAU) - PI; }
+float phiOf(vec2 p) { return atan(p.x, -p.y); }
+
+// The pile of sand pushed along in front of the blade.
+float pileHeight(vec2 p, float r, float ahead) {
+  float w = 0.042 + 0.026 * vnoise(vec2(r * 14.0, 3.7));
+  float f = exp(-pow(ahead / w, 1.2));
+  float H = (0.004 + 0.030 * smoothstep(0.05, 0.85, r)) * smoothstep(BLADE_L + 0.012, BLADE_L - 0.03, r);
+  H *= 0.8 + 0.4 * vnoise(vec2(r * 30.0, ahead * 45.0));
+  H *= 0.7 - 0.3 * cos(TAU * r / TOOTH);             // a little heap in front of every tooth
+  return f * H + (vnoise(p * 110.0) - 0.5) * 0.0012 * f;
+}
+float bladeAhead(float r, float phi) { return (TAU - mod(uSecA - phi, TAU)) * r; }
+`;
+
+const GLSL_SAND = `
+uniform sampler2D uDial;      // R = hour numbers, G = minute numbers, B = soft halo
+uniform vec4 uCur;            // current hour (0-11), minute, second, second fade-in
+uniform float uSecPrev;
+const float DIAL_R = ${DIAL_R.toFixed(4)};
+
+float sandHeight(vec2 p, out vec3 info) {
+  float r = length(p);
+  float phi = phiOf(p);
+  float d = mod(uSecA - phi, TAU);          // angle since the blade passed here
+  float ahead = (TAU - d) * r;              // distance in front of the blade
+
+  // freshly pushed sand is smooth with faint drag marks; it slowly loosens again
+  float settle = smoothstep(0.08 * TAU, 0.95 * TAU, d);
+  float drag = (vnoise(vec2(r * 150.0, phi * 1.5)) - 0.5) * 0.0009 * (1.0 - settle);
+  // grooves combed by the teeth: deep and crisp right behind the hand, softening as the sand settles
+  float fresh = 1.0 - smoothstep(0.02 * TAU, 0.9 * TAU, d);
+  float wob = (vnoise(vec2(phi * 3.0, r * 4.0)) - 0.5) * 0.004 * (1.0 - fresh);
+  float gv = cos(TAU * (r + wob) / TOOTH);
+  float grooves = 0.0055 * (sign(gv) * pow(abs(gv), 0.7)) * fresh * fresh * smoothstep(0.035, 0.07, r) * smoothstep(BLADE_L + 0.005, BLADE_L - 0.02, r);
+  float loose = ((vnoise(p * 26.0) - 0.5) * 0.0024 + (vnoise(p * 90.0) - 0.5) * 0.0009) * (0.25 + 0.75 * settle);
+  float pile = pileHeight(p, r, ahead);
+  float covered = clamp(pile * 120.0, 0.0, 1.0);
+
+  // the clock face printed in the sand: shows only where the blade has uncovered it
+  vec4 m = textureLod(uDial, p / (2.0 * DIAL_R) + 0.5, 0.0);
+  float reveal = (1.0 - smoothstep(0.10 * TAU, 0.80 * TAU, d)) * (1.0 - covered);
+  float hIdx = mod(floor(phi / (TAU / 12.0) + 0.5), 12.0);
+  float mIdx = mod(floor(phi / (TAU / 60.0) + 0.5), 60.0);
+  float bH = abs(hIdx - uCur.x) < 0.5 ? m.r : 0.0;
+  float bM = abs(mIdx - uCur.y) < 0.5 ? m.g : 0.0;
+  float sW = (abs(mIdx - uCur.z) < 0.5 ? uCur.w : 0.0) + (abs(mIdx - uSecPrev) < 0.5 ? 1.0 - uCur.w : 0.0);
+  float black = smoothstep(0.15, 0.55, max(max(bH, bM), sW * m.g)) * (1.0 - covered) * smoothstep(0.85, 1.0, uPattern);
+  float glyph = max(m.r, m.g);
+  float imprint = (-0.0045 * glyph + 0.0018 * max(m.b - glyph, 0.0)) * reveal * (1.0 - black);
+
+  grooves *= 1.0 - 0.75 * m.b;                       // keep the numbers readable
+  float h = drag + loose + grooves + pile + imprint + black * 0.0008 + 0.006 * smoothstep(0.925, 0.948, r);
+  h *= uPattern;
+  // poured / refilling sand: a soft heap with a fine, loose surface
+  h += (1.0 - uPattern) * ((0.012 * (1.0 - r * r) - 0.006) + (vnoise(p * 55.0) - 0.5) * 0.0018) * (1.0 - smoothstep(0.9, 0.948, r));
+  info = vec3(pile * uPattern, glyph * reveal * uPattern, black);
+  return h + uLevel;
+}
+`;
+
+const SAND_VS = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+${GLSL_COMMON}
+${GLSL_SAND}
+in vec2 aPos;
+uniform mat4 uModel, uView, uProj;
+out vec2 vP;
+void main() {
+  vec3 info;
+  float h = sandHeight(aPos, info);
+  vP = aPos;
+  gl_Position = uProj * uView * uModel * vec4(aPos.x, h, aPos.y, 1.0);
+}`;
+
+const SAND_FS = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+${GLSL_COMMON}
+${GLSL_SAND}
+uniform vec3 uLightL, uEyeL;     // light + eye in the tray's local space
+uniform float uHourA, uMinA;
+in vec2 vP;
+out vec4 outColor;
+
+vec2 dirOf(float a) { return vec2(sin(a), -cos(a)); }
+float segShadow(vec2 q, float a, float t0, float t1, float hw, float soft) {
+  vec2 dir = dirOf(a);
+  float t = clamp(dot(q, dir), t0, t1);
+  return smoothstep(hw - soft, hw + soft, length(q - dir * t));
+}
+// soft analytic shadows of the blade, hands, post and tray rim
+float shadowAt(vec2 p, float h) {
+  if (uLightL.y < 0.05) return 1.0;
+  vec2 sl = uLightL.xz / uLightL.y;
+  float s = 1.0, lift;
+  lift = max(0.036 - h, 0.0);
+  s *= mix(1.0, segShadow(p + sl * lift, uSecA, -0.05, BLADE_L, 0.0045, 0.0015 + lift * 0.1), 0.82);
+  lift = max(0.06 - h, 0.0);
+  s *= mix(1.0, segShadow(p + sl * lift, uMinA, -0.06, 0.80, 0.0045, 0.002 + lift * 0.1), 0.8);
+  lift = max(0.072 - h, 0.0);
+  s *= mix(1.0, segShadow(p + sl * lift, uHourA, -0.05, 0.50, 0.008, 0.002 + lift * 0.1), 0.8);
+  lift = max(0.06 - h, 0.0);
+  s *= mix(1.0, smoothstep(0.03, 0.036 + lift * 0.08, length(p + sl * lift)), 0.85);
+  lift = max(0.038 - h, 0.0);
+  s *= 1.0 - 0.75 * smoothstep(0.944, 0.958, length(p + sl * lift));
+  return s;
+}
+
+void main() {
+  vec3 info, tmp;
+  float h = sandHeight(vP, info);
+  float e = 0.0012;
+  float hx = sandHeight(vP + vec2(e, 0.0), tmp);
+  float hz = sandHeight(vP + vec2(0.0, e), tmp);
+  vec3 N = normalize(vec3(-(hx - h) / e, 1.0, -(hz - h) / e));
+
+  // single grains: tiny normal + colour variation
+  vec2 gp = floor(vP * 1400.0);
+  float g1 = hash12(gp), g2 = hash12(gp + 17.3), g3 = hash12(gp + 41.7);
+  N = normalize(N + vec3(g1 - 0.5, 0.0, g2 - 0.5) * 0.14);
+
+  vec3 base = vec3(0.95, 0.945, 0.93) * (0.94 + 0.09 * g1);
+  base = mix(base, vec3(0.62, 0.6, 0.57), step(0.9985, g3));           // rare dark grains
+  base *= 1.0 - 0.06 * info.y * (1.0 - info.z);                          // uncovered numbers
+  vec3 blk = vec3(0.045, 0.045, 0.048) * (0.7 + 0.7 * g1);
+  base = mix(base, blk, info.z);                                         // black sand = the current time
+
+  float hl = h - uLevel;
+  float diff = max(dot(N, uLightL), 0.0);
+  float sh = shadowAt(vP, hl);
+  float ao = clamp(1.0 + hl * 40.0, 0.8, 1.06);
+  ao *= mix(0.55, 1.0, smoothstep(-0.11, -0.02, uLevel));               // deeper in the tray = darker
+  vec3 col = base * (vec3(1.0, 0.985, 0.96) * 0.86 * diff * sh + vec3(0.39, 0.395, 0.41)) * ao;
+
+  vec3 V = normalize(uEyeL - vec3(vP.x, h, vP.y));
+  float glint = pow(max(dot(N, normalize(uLightL + V)), 0.0), 60.0) * step(0.88, g1) * sh;
+  col += glint * mix(0.22, 0.5, info.z);
+
+  col = col / (1.0 + max(col - 0.86, 0.0) * 1.6);
+  outColor = vec4(col, 1.0);
+}`;
+
+// the side of the slab of sand, seen through the glass
+const SIDE_VS = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+${GLSL_COMMON}
+${GLSL_SAND}
+in vec2 aSide;            // angle around, 0 = bottom / 1 = top
+uniform mat4 uModel, uView, uProj;
+out vec3 vN;
+out vec2 vUV;
+void main() {
+  float a = aSide.x;
+  vec2 dir = vec2(sin(a), -cos(a));
+  vec3 info;
+  float top = sandHeight(dir * 0.946, info);
+  float y = mix(-0.116, top, aSide.y);
+  vUV = vec2(a * 300.0, y * 600.0);
+  vN = mat3(uModel) * vec3(dir.x, 0.0, dir.y);
+  gl_Position = uProj * uView * uModel * vec4(dir.x * 0.947, y, dir.y * 0.947, 1.0);
+}`;
+const SIDE_FS = `#version 300 es
+precision highp float;
+uniform vec3 uLight;
+in vec3 vN;
+in vec2 vUV;
+out vec4 outColor;
+float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+void main() {
+  vec3 N = normalize(vN);
+  float g = hash12(floor(vUV));
+  float diff = max(dot(N, uLight), 0.0);
+  vec3 col = vec3(0.93, 0.925, 0.91) * (0.92 + 0.1 * g) * (0.75 * diff + 0.36);
+  outColor = vec4(col, 1.0);
+}`;
+
+// a barely-there glass dish: only its edges catch the light
+const GLASS_FS = `#version 300 es
+precision highp float;
+uniform vec3 uLight, uEye;
+in vec3 vN;
+in vec3 vW;
+out vec4 outColor;
+void main() {
+  vec3 N = normalize(vN);
+  vec3 V = normalize(uEye - vW);
+  if (dot(N, V) < 0.0) N = -N;
+  float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+  float spec = pow(max(dot(N, normalize(uLight + V)), 0.0), 90.0);
+  float a = clamp(0.025 + 0.28 * fres + 0.5 * spec, 0.0, 0.8);
+  outColor = vec4(vec3(0.92, 0.94, 0.96) * a, a);
+}`;
+
+// grains tumbling off the pile in front of the blade (animated on the GPU, tray space)
+const PILE_VS = `#version 300 es
+precision highp float;
+${GLSL_COMMON}
+in vec4 aSeed;
+uniform mat4 uModel, uView, uProj;
+uniform float uPx;
+out vec3 vCol;
+out float vA;
+void main() {
+  float life = fract(uTime * (0.22 + 0.25 * aSeed.x) + aSeed.y);
+  float r = mix(0.08, BLADE_L - 0.02, sqrt(aSeed.z));
+  float ahead = mix(0.003, 0.05 + 0.05 * aSeed.w, pow(life, 0.75));
+  float phi = uSecA + ahead / r;
+  vec2 p = r * vec2(sin(phi), -cos(phi));
+  float h = pileHeight(p, r, ahead) * uPattern + uLevel;
+  float hop = 0.007 * abs(sin(life * PI * (2.0 + 3.0 * aSeed.x))) * (1.0 - life);
+  vec4 mv = uView * uModel * vec4(p.x, h + 0.0012 + hop, p.y, 1.0);
+  gl_Position = uProj * mv;
+  float size = 0.0026 * (0.6 + 0.8 * aSeed.w) * smoothstep(0.0, 0.08, life) * (1.0 - smoothstep(0.7, 1.0, life)) * uPattern;
+  float px = size * uPx / max(-mv.z, 0.01);
+  gl_PointSize = clamp(px, 0.0, 6.0);
+  if (px < 0.6) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);    // hide spent grains
+  vCol = vec3(0.95, 0.945, 0.93) * (0.92 + 0.1 * aSeed.w);
+  vA = 1.0;
+}`;
+
+const SOLID_VS = `#version 300 es
+precision highp float;
+in vec3 aPos;
+in vec3 aNor;
+uniform mat4 uModel, uView, uProj;
+out vec3 vN;
+out vec3 vW;
+void main() {
+  vec4 w = uModel * vec4(aPos, 1.0);
+  vW = w.xyz;
+  vN = mat3(uModel) * aNor;
+  gl_Position = uProj * uView * w;
+}`;
+
+const SOLID_FS = `#version 300 es
+precision highp float;
+uniform vec3 uColor, uLight, uEye;
+uniform float uShine, uSpec;
+in vec3 vN;
+in vec3 vW;
+out vec4 outColor;
+void main() {
+  vec3 N = normalize(vN);
+  vec3 V = normalize(uEye - vW);
+  if (dot(N, V) < 0.0) N = -N;
+  float diff = max(dot(N, uLight), 0.0);
+  vec3 amb = mix(vec3(0.30, 0.30, 0.31), vec3(0.62, 0.62, 0.64), N.y * 0.5 + 0.5) * 0.6;
+  float spec = pow(max(dot(N, normalize(uLight + V)), 0.0), uShine) * uSpec;
+  float rim = pow(1.0 - max(dot(N, V), 0.0), 4.0) * 0.12;            // soft satin edge
+  vec3 col = uColor * (diff * 0.8 + amb) + spec + rim;
+  outColor = vec4(col, 1.0);
+}`;
+
+const AIR_VS = `#version 300 es
+precision highp float;
+in vec3 aPos;
+in vec2 aSA;     // size, alpha
+uniform mat4 uView, uProj;
+uniform float uPx;
+out vec3 vCol;
+out float vA;
+void main() {
+  vec4 mv = uView * vec4(aPos, 1.0);
+  gl_Position = uProj * mv;
+  float px = aSA.x * uPx / max(-mv.z, 0.01);
+  gl_PointSize = clamp(px, 0.0, 7.0);
+  vA = aSA.y * clamp(px / 1.2, 0.0, 1.0);
+  if (px < 0.4) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+  vCol = vec3(0.96, 0.955, 0.94);
+}`;
+
+const GRAIN_FS = `#version 300 es
+precision highp float;
+uniform vec3 uLightView;
+in vec3 vCol;
+in float vA;
+out vec4 outColor;
+void main() {
+  vec2 c = gl_PointCoord * 2.0 - 1.0;
+  float d = dot(c, c);
+  if (d > 1.0) discard;
+  vec3 n = vec3(c.x, -c.y, sqrt(1.0 - d));
+  float l = 0.6 + 0.42 * max(dot(n, normalize(vec3(-0.45, 0.6, 0.65))), 0.0);   // soft key light from the front-left
+  float a = vA * (1.0 - smoothstep(0.6, 1.0, d));
+  outColor = vec4(vCol * l * a, a);
+}`;
+
+// ------------------------------------------------------------
+//  ShaderProgram: compile + uniform helpers
+// ------------------------------------------------------------
+class ShaderProgram {
+  constructor(gl, vs, fs) {
+    this.gl = gl;
+    const compile = (type, src) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      return s;
+    };
+    this.prog = gl.createProgram();
+    gl.attachShader(this.prog, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(this.prog, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(this.prog);
+    if (!gl.getProgramParameter(this.prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(this.prog));
+    this.locs = {};
+  }
+  use() { this.gl.useProgram(this.prog); return this; }
+  loc(name) {
+    if (!(name in this.locs)) this.locs[name] = this.gl.getUniformLocation(this.prog, name);
+    return this.locs[name];
+  }
+  attrib(name) { return this.gl.getAttribLocation(this.prog, name); }
+  f(name, v) { const l = this.loc(name); if (l) this.gl.uniform1f(l, v); }
+  v3(name, a) { const l = this.loc(name); if (l) this.gl.uniform3fv(l, a); }
+  v4arr(name, a) { const l = this.loc(name); if (l) this.gl.uniform4fv(l, a); }
+  m4(name, m) { const l = this.loc(name); if (l) this.gl.uniformMatrix4fv(l, false, m); }
+  i(name, v) { const l = this.loc(name); if (l) this.gl.uniform1i(l, v); }
+}
+
+// ------------------------------------------------------------
+//  Mesh: a vertex array with attributes and optional indices
+// ------------------------------------------------------------
+class Mesh {
+  constructor(gl, program, attribs, indices, mode, dynamic = false) {
+    this.gl = gl;
+    this.mode = mode ?? gl.TRIANGLES;
+    this.vao = gl.createVertexArray();
+    this.buffers = {};
+    gl.bindVertexArray(this.vao);
+    this.count = 0;
+    for (const [name, { data, size }] of Object.entries(attribs)) {
+      const loc = program.attrib(name);
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, data, dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+      if (loc >= 0) {
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+      }
+      this.buffers[name] = buf;
+      this.count = data.length / size;
+    }
+    if (indices) {
+      const ib = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+      this.indexCount = indices.length;
+      this.indexType = indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT;
+    }
+    gl.bindVertexArray(null);
+  }
+  update(name, data) {
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[name]);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data);
+  }
+  draw(count) {
+    const gl = this.gl;
+    gl.bindVertexArray(this.vao);
+    if (this.indexCount) gl.drawElements(this.mode, this.indexCount, this.indexType, 0);
+    else gl.drawArrays(this.mode, 0, count ?? this.count);
+  }
+}
+
+// ---------- geometry ----------
+function buildDisc(R, nr, na) {
+  const pos = [0, 0];
+  for (let i = 1; i <= nr; i++) {
+    const r = R * i / nr;
+    for (let j = 0; j < na; j++) {
+      const a = (j / na) * TAU;
+      pos.push(Math.sin(a) * r, -Math.cos(a) * r);
+    }
+  }
+  const idx = [];
+  for (let j = 0; j < na; j++) idx.push(0, 1 + j, 1 + ((j + 1) % na));
+  for (let i = 0; i < nr - 1; i++) {
+    const a0 = 1 + i * na, a1 = 1 + (i + 1) * na;
+    for (let j = 0; j < na; j++) {
+      const j1 = (j + 1) % na;
+      idx.push(a0 + j, a1 + j, a1 + j1, a0 + j, a1 + j1, a0 + j1);
+    }
+  }
+  return { pos: new Float32Array(pos), idx: new Uint32Array(idx) };
+}
+
+// Geometry collects triangles with normals; several shapes can be merged.
+class Geometry {
+  constructor() { this.P = []; this.N = []; this.I = []; }
+  get vcount() { return this.P.length / 3; }
+  quad(a, b, c, d, n) {
+    const o = this.vcount;
+    for (const v of [a, b, c, d]) { this.P.push(...v); this.N.push(...n); }
+    this.I.push(o, o + 1, o + 2, o, o + 2, o + 3);
+  }
+  box(x0, x1, y0, y1, z0, z1) {
+    this.quad([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], [1, 0, 0]);
+    this.quad([x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0], [-1, 0, 0]);
+    this.quad([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [0, 1, 0]);
+    this.quad([x0, y0, z1], [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [0, -1, 0]);
+    this.quad([x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [x0, y0, z1], [0, 0, 1]);
+    this.quad([x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0], [0, 0, -1]);
+  }
+  lathe(profile, seg) {
+    const n2 = profile.map((p, i) => {
+      const a = profile[Math.max(0, i - 1)], b = profile[Math.min(profile.length - 1, i + 1)];
+      const dr = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dr, dy) || 1;
+      return [-dy / l, dr / l];
+    });
+    const o = this.vcount, P = profile.length;
+    for (let s = 0; s <= seg; s++) {
+      const a = (s / seg) * TAU, c = Math.cos(a), sn = Math.sin(a);
+      profile.forEach((p, i) => {
+        this.P.push(p[0] * sn, p[1], -p[0] * c);
+        this.N.push(n2[i][0] * sn, n2[i][1], -n2[i][0] * c);
+      });
+    }
+    for (let s = 0; s < seg; s++) for (let i = 0; i < P - 1; i++) {
+      const a = o + s * P + i, b = o + (s + 1) * P + i;
+      this.I.push(a, b, a + 1, a + 1, b, b + 1);
+    }
+  }
+  // a band with a rectangular cross-section that follows a path in the XZ plane
+  ribbon(path, hw, y0, y1) {
+    const sides = path.map((p, i) => {
+      const a = path[Math.max(0, i - 1)], b = path[Math.min(path.length - 1, i + 1)];
+      const tx = b[0] - a[0], tz = b[1] - a[1], l = Math.hypot(tx, tz) || 1;
+      return [-tz / l, tx / l];
+    });
+    const L = (pt, s, k, y) => [pt[0] + s[0] * hw * k, y, pt[1] + s[1] * hw * k];
+    for (let i = 0; i < path.length - 1; i++) {
+      const p = path[i], q = path[i + 1], n = sides[i], m = sides[i + 1];
+      this.quad(L(p, n, -1, y1), L(q, m, -1, y1), L(q, m, 1, y1), L(p, n, 1, y1), [0, 1, 0]);
+      this.quad(L(p, n, 1, y0), L(p, n, 1, y1), L(q, m, 1, y1), L(q, m, 1, y0), [n[0], 0, n[1]]);
+      this.quad(L(q, m, -1, y0), L(q, m, -1, y1), L(p, n, -1, y1), L(p, n, -1, y0), [-n[0], 0, -n[1]]);
+      this.quad(L(p, n, -1, y0), L(p, n, 1, y0), L(q, m, 1, y0), L(q, m, -1, y0), [0, -1, 0]);
+    }
+    const e = path[path.length - 1], s = sides[sides.length - 1], pe = path[path.length - 2];
+    const tl = Math.hypot(e[0] - pe[0], e[1] - pe[1]) || 1;
+    this.quad(L(e, s, -1, y0), L(e, s, -1, y1), L(e, s, 1, y1), L(e, s, 1, y0), [(e[0] - pe[0]) / tl, 0, (e[1] - pe[1]) / tl]);
+  }
+  sphere(cx, cy, cz, rx, ry, rz, seg = 18) {
+    const o = this.vcount;
+    for (let i = 0; i <= seg; i++) {
+      const th = (i / seg) * Math.PI;
+      for (let j = 0; j <= seg; j++) {
+        const ph = (j / seg) * TAU;
+        const n = [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)];
+        this.P.push(cx + n[0] * rx, cy + n[1] * ry, cz + n[2] * rz);
+        this.N.push(...normalize3([n[0] / rx, n[1] / ry, n[2] / rz]));
+      }
+    }
+    for (let i = 0; i < seg; i++) for (let j = 0; j < seg; j++) {
+      const a = o + i * (seg + 1) + j, b = a + seg + 1;
+      this.I.push(a, a + 1, b, a + 1, b + 1, b);
+    }
+  }
+  toMesh(gl, prog) {
+    return new Mesh(gl, prog, { aPos: { data: new Float32Array(this.P), size: 3 }, aNor: { data: new Float32Array(this.N), size: 3 } }, new Uint32Array(this.I));
+  }
+}
+
+// ------------------------------------------------------------
+//  TimeKeeper: current time in any timezone
+// ------------------------------------------------------------
+class TimeKeeper {
+  constructor() { this.cache = {}; }
+  fmt(tz, opts) {
+    const key = tz + JSON.stringify(opts);
+    if (!this.cache[key]) this.cache[key] = new Intl.DateTimeFormat('en-GB', { timeZone: tz, ...opts });
+    return this.cache[key];
+  }
+  get(tz) {
+    const now = new Date();
+    const p = {};
+    for (const part of this.fmt(tz, {
+      hourCycle: 'h23', year: 'numeric', month: 'long', day: 'numeric', weekday: 'long',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(now)) p[part.type] = part.value;
+    let offset = '';
+    try {
+      const o = this.fmt(tz, { timeZoneName: 'shortOffset' }).formatToParts(now).find(x => x.type === 'timeZoneName');
+      offset = o ? o.value.replace('GMT', 'UTC').replace('-', '−') : '';
+      if (offset === 'UTC') offset = 'UTC+0';
+    } catch (e) { /* older browsers */ }
+    return {
+      h: (+p.hour) % 24, m: +p.minute, s: +p.second, ms: now.getMilliseconds(),
+      date: `${p.weekday}  ${p.day} ${p.month} ${p.year}`.toUpperCase(),
+      offset,
+    };
+  }
+}
+
+// ------------------------------------------------------------
+//  DialFace: the clock face that is printed in the sand.
+//  Drawn once into a top-down texture of the whole tray.
+//  R = hour numbers (12, 1 ... 11), G = minute numbers (00 ... 59),
+//  B = a soft halo around them (sand pushed up around the print).
+// ------------------------------------------------------------
+class DialFace {
+  constructor(size = 1536) { this.size = size; }
+
+  build(fontFamily) {
+    const S = this.size, px = S / (2 * DIAL_R);
+    const layer = (draw) => {
+      const c = document.createElement('canvas');
+      c.width = S; c.height = S;
+      const g = c.getContext('2d');
+      g.fillStyle = '#000'; g.fillRect(0, 0, S, S);
+      g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      draw(g);
+      const src = g.getImageData(0, 0, S, S).data;
+      const a = new Float32Array(S * S);
+      for (let i = 0; i < S * S; i++) a[i] = src[i * 4] / 255;
+      return a;
+    };
+    const at = (r, a) => [S / 2 + Math.sin(a) * r * px, S / 2 - Math.cos(a) * r * px];
+    const hours = layer(g => {
+      g.font = `600 ${Math.round(HOUR_SIZE * px)}px ${fontFamily}`;
+      for (let i = 0; i < 12; i++) {
+        const [x, y] = at(HOUR_R, (i / 12) * TAU);
+        g.fillText(i === 0 ? '12' : String(i), x, y + HOUR_SIZE * px * 0.04);
+      }
+    });
+    const mins = layer(g => {
+      g.font = `600 ${Math.round(MIN_SIZE * px)}px ${fontFamily}`;
+      for (let i = 0; i < 60; i++) {
+        const [x, y] = at(MIN_R, (i / 60) * TAU);
+        g.fillText(pad2(i), x, y + MIN_SIZE * px * 0.04);
+      }
+    });
+    const R = boxBlur(hours, S, S, 1, 1);
+    const G = boxBlur(mins, S, S, 1, 1);
+    const both = new Float32Array(S * S);
+    for (let i = 0; i < S * S; i++) both[i] = Math.max(hours[i], mins[i]);
+    const B = normalizeMax(boxBlur(both, S, S, 4, 2));
+    const data = new Uint8Array(S * S * 4);
+    for (let i = 0; i < S * S; i++) {
+      data[i * 4] = R[i] * 255;
+      data[i * 4 + 1] = G[i] * 255;
+      data[i * 4 + 2] = B[i] * 255;
+      data[i * 4 + 3] = 255;
+    }
+    this.data = data;
+  }
+}
+
+function boxBlur(src, W, H, r, passes) {
+  const a = new Float32Array(src);
+  const tmp = new Float32Array(W * H);
+  const n = 2 * r + 1;
+  for (let p = 0; p < passes; p++) {
+    for (let y = 0; y < H; y++) {             // horizontal, clamped
+      const o = y * W;
+      let s = 0;
+      for (let x = -r; x <= r; x++) s += a[o + clamp(x, 0, W - 1)];
+      for (let x = 0; x < W; x++) {
+        tmp[o + x] = s / n;
+        s += a[o + clamp(x + r + 1, 0, W - 1)] - a[o + clamp(x - r, 0, W - 1)];
+      }
+    }
+    for (let x = 0; x < W; x++) {             // vertical, wraps around the ring
+      let s = 0;
+      for (let y = -r; y <= r; y++) s += tmp[((y + H) % H) * W + x];
+      for (let y = 0; y < H; y++) {
+        a[y * W + x] = s / n;
+        s += tmp[((y + r + 1) % H) * W + x] - tmp[((y - r + H) % H) * W + x];
+      }
+    }
+  }
+  return a;
+}
+function normalizeMax(a) {
+  let m = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] > m) m = a[i];
+  if (m > 0) for (let i = 0; i < a.length; i++) a[i] = Math.min(1, a[i] / m);
+  return a;
+}
+
+// ------------------------------------------------------------
+//  Hands: eased angles for the hour/minute needles and the rake arm
+// ------------------------------------------------------------
+class Hands {
+  constructor() { this.h = 0; this.m = 0; this.s = 0; }
+  update(T, k) {
+    const hT = (((T.h % 12) + T.m / 60 + T.s / 3600) / 12) * TAU;
+    const mT = ((T.m + T.s / 60) / 60) * TAU;
+    const sT = ((T.s + T.ms / 1000) / 60) * TAU;
+    this.h = wrapTau(this.h + wrapPI(hT - this.h) * easeFactor(0.06, k));
+    this.m = wrapTau(this.m + wrapPI(mT - this.m) * easeFactor(0.08, k));
+    this.s = wrapTau(this.s + wrapPI(sT - this.s) * easeFactor(0.25, k));
+  }
+}
+
+// ------------------------------------------------------------
+//  GrainField: sand grains drifting through the air
+//  kind 0 = poured sand, 1 = fine dust (floats longer), 2 = falling back in
+// ------------------------------------------------------------
+class GrainField {
+  constructor(max) {
+    this.max = max;
+    this.n = 0;
+    this.pos = new Float32Array(max * 3);
+    this.vel = new Float32Array(max * 3);
+    this.age = new Float32Array(max);
+    this.seed = new Float32Array(max);
+    this.kind = new Uint8Array(max);
+    this.out = new Float32Array(max * 3);
+    this.sa = new Float32Array(max * 2);
+    this.inFlight = 0;      // refill grains still in the air
+  }
+  spawn(p, v, kind) {
+    if (this.n >= this.max) return false;
+    const i = this.n++;
+    this.pos.set(p, i * 3);
+    this.vel.set(v, i * 3);
+    this.age[i] = 0;
+    this.seed[i] = Math.random();
+    this.kind[i] = kind;
+    if (kind === 2) this.inFlight++;
+    return true;
+  }
+  remove(i) {
+    if (this.kind[i] === 2) this.inFlight--;
+    const j = --this.n;
+    if (i === j) return;
+    this.pos.copyWithin(i * 3, j * 3, j * 3 + 3);
+    this.vel.copyWithin(i * 3, j * 3, j * 3 + 3);
+    this.age[i] = this.age[j]; this.seed[i] = this.seed[j]; this.kind[i] = this.kind[j];
+  }
+  // calm = the dish is upright again, so leftover grains fade out quickly
+  update(dt, t, calm) {
+    for (let i = 0; i < this.n;) {
+      const o = i * 3, kind = this.kind[i], sd = this.seed[i];
+      let x = this.pos[o], y = this.pos[o + 1], z = this.pos[o + 2];
+      let vx = this.vel[o], vy = this.vel[o + 1], vz = this.vel[o + 2];
+      const dust = kind === 1;
+      const grav = dust ? -0.12 : -0.55;
+      const drag = dust ? 1.9 : 1.35;
+      const windA = kind === 2 ? 0.05 : dust ? 0.34 : 0.17;
+      // a slow, swirling breeze
+      const wx = Math.sin(y * 1.7 + t * 0.35 + z * 1.3 + sd * 6) + 0.5 * Math.sin(z * 3.1 - t * 0.5);
+      const wz = Math.cos(y * 1.3 - t * 0.3 + x * 1.6 + sd * 4) + 0.5 * Math.sin(x * 2.7 + t * 0.45);
+      const wy = 0.35 * Math.sin(x * 2.0 + z * 1.5 + t * 0.6 + sd * 3);
+      vx += wx * windA * dt; vy += (grav + wy * windA) * dt; vz += wz * windA * dt;
+      const f = Math.exp(-drag * dt);
+      vx *= f; vy *= f; vz *= f;
+      x += vx * dt; y += vy * dt; z += vz * dt;
+      this.age[i] += dt;
+      this.pos[o] = x; this.pos[o + 1] = y; this.pos[o + 2] = z;
+      this.vel[o] = vx; this.vel[o + 1] = vy; this.vel[o + 2] = vz;
+
+      if (calm) this.age[i] += dt * 5;
+      if (y < -3.5 || this.age[i] > (dust ? 24 : 16)) { this.remove(i); continue; }
+      i++;
+    }
+    // pack for the GPU
+    for (let i = 0; i < this.n; i++) {
+      const o = i * 3, kind = this.kind[i], a = this.age[i], y = this.pos[o + 1];
+      this.out[o] = this.pos[o]; this.out[o + 1] = y; this.out[o + 2] = this.pos[o + 2];
+      const life = kind === 1 ? 24 : 16;
+      let alpha = (kind === 1 ? 0.38 : 0.95) * smoothstep(0, 0.25, a) * (1 - smoothstep(life - 4, life, a));
+      alpha *= smoothstep(-3.4, -2.2, y);
+      this.sa[i * 2] = (kind === 1 ? 0.009 : 0.005) * (0.65 + 0.7 * this.seed[i]);
+      this.sa[i * 2 + 1] = alpha;
+    }
+  }
+}
+
+// ------------------------------------------------------------
+//  TrayControl: the tray you can grab and turn over
+// ------------------------------------------------------------
+class TrayControl {
+  constructor(canvas) {
+    this.pitch = 0; this.yaw = 0; this.lift = 0;
+    this.goal = { pitch: 0, yaw: 0 };
+    this.dragging = false;
+    this.model = M4.translate(0, 0, 0);
+    this.prevModel = this.model;
+
+    canvas.addEventListener('pointerdown', e => {
+      this.dragging = true; this.lx = e.clientX; this.ly = e.clientY;
+      canvas.setPointerCapture(e.pointerId); canvas.classList.add('dragging');
+    });
+    canvas.addEventListener('pointermove', e => {
+      if (!this.dragging) return;
+      const dx = e.clientX - this.lx, dy = e.clientY - this.ly;
+      this.lx = e.clientX; this.ly = e.clientY;
+      this.goal.yaw -= dx * 0.006;
+      this.goal.pitch += dy * 0.006;
+    });
+    const end = () => { this.dragging = false; canvas.classList.remove('dragging'); };
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', end);
+    canvas.addEventListener('dblclick', () => this.reset());
+  }
+  get upY() { return this.model[5]; }     // 1 = sand side up, -1 = upside down
+  reset() {
+    this.goal.pitch = Math.round(this.pitch / TAU) * TAU;
+    this.goal.yaw = Math.round(this.yaw / TAU) * TAU;
+  }
+  flip() {
+    if (this.upY > 0) this.goal.pitch = Math.round(this.pitch / TAU) * TAU + Math.PI;
+    else this.reset();
+  }
+  update(k) {
+    const f = easeFactor(this.dragging ? 0.25 : 0.045, k);    // a little weight to it
+    this.pitch += (this.goal.pitch - this.pitch) * f;
+    this.yaw += (this.goal.yaw - this.yaw) * f;
+    this.prevModel = this.model;
+    const up = Math.cos(this.pitch);
+    this.lift += (0.22 * (1 - up) / 2 - this.lift) * easeFactor(0.05, k);   // rises a little when turned over
+    this.model = M4.mul(M4.translate(0, this.lift, 0), M4.mul(M4.rotX(this.pitch), M4.rotY(this.yaw)));
+  }
+}
+
+// ------------------------------------------------------------
+//  Camera: a fixed 3D view, mouse wheel / pinch to zoom
+// ------------------------------------------------------------
+class Camera {
+  constructor(canvas) {
+    this.fov = 32 * Math.PI / 180;
+    this.el = 0.3; this.zoom = 1.4;          // intro: drifts in from a low angle
+    this.goal = { el: 62 * Math.PI / 180, zoom: 1.0 };
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      this.goal.zoom = clamp(this.goal.zoom * Math.exp(e.deltaY * 0.001), 0.45, 2.4);
+    }, { passive: false });
+  }
+  // inverted: 0 = dish upright, 1 = turned over (the view lowers to watch the sand fall)
+  update(k, aspect, inverted) {
+    const f = easeFactor(0.04, k);
+    this.inv = (this.inv ?? 0) + (inverted - (this.inv ?? 0)) * easeFactor(0.03, k);
+    const el = this.goal.el + (20 * Math.PI / 180 - this.goal.el) * this.inv;
+    this.el += (el - this.el) * f;
+    this.zoom += (this.goal.zoom - this.zoom) * f;
+    const fit = 1.12 / Math.tan(this.fov / 2) / Math.min(1, aspect);
+    const dist = fit * (1.3 + 0.25 * this.inv) * this.zoom;
+    const target = [0, -0.04 - 0.75 * this.inv, 0.05];
+    this.eye = [0, target[1] + dist * Math.sin(this.el), target[2] + dist * Math.cos(this.el)];
+    this.view = M4.lookAt(this.eye, target, [0, 1, 0]);
+    this.proj = M4.perspective(this.fov, aspect, 0.05, 40);
+  }
+}
+
+// ------------------------------------------------------------
+//  SandClock: puts everything together
+// ------------------------------------------------------------
+class SandClock {
+  constructor(canvas) {
+    this.canvas = canvas;
+    const gl = canvas.getContext('webgl2', { antialias: true, alpha: true, premultipliedAlpha: true });
+    if (!gl) throw new Error('no-webgl2');
+    this.gl = gl;
+
+    this.keeper = new TimeKeeper();
+    this.dial = new DialFace();
+    this.hands = new Hands();
+    this.camera = new Camera(canvas);
+    this.tray = new TrayControl(canvas);
+    this.grains = new GrainField(26000);
+    this.fill = 1;            // how much sand is in the tray (0..1)
+    this.pourAcc = 0;
+    this.refillAcc = 0;
+    this.cityIndex = 0;
+    this.sec = { cur: 0, prev: 0, mix: 1 };
+    this.last = performance.now();
+    this.t0 = this.last;
+
+    this.sandProg = new ShaderProgram(gl, SAND_VS, SAND_FS);
+    this.solidProg = new ShaderProgram(gl, SOLID_VS, SOLID_FS);
+    this.pileProg = new ShaderProgram(gl, PILE_VS, GRAIN_FS);
+    this.airProg = new ShaderProgram(gl, AIR_VS, GRAIN_FS);
+    this.sideProg = new ShaderProgram(gl, SIDE_VS, SIDE_FS);
+    this.glassProg = new ShaderProgram(gl, SOLID_VS, GLASS_FS);
+
+    this.buildScene();
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+  }
+
+  buildScene() {
+    const gl = this.gl;
+
+    const disc = buildDisc(SAND_R, 360, 1024);
+    this.sandMesh = new Mesh(gl, this.sandProg, { aPos: { data: disc.pos, size: 2 } }, disc.idx);
+
+    // a thin, almost invisible glass dish around the sand
+    const prof = [[0.0, -0.124], [0.5, -0.124], [0.951, -0.124], [0.951, 0.03]];
+    for (let i = 1; i <= 5; i++) { const a = Math.PI - (i / 5) * Math.PI; prof.push([0.955 + Math.cos(a) * 0.004, 0.03 + Math.sin(a) * 0.004]); }
+    prof.push([0.959, -0.124]);
+    for (let i = 1; i <= 4; i++) { const a = -(i / 4) * Math.PI / 2; prof.push([0.951 + Math.cos(a) * 0.008, -0.124 + Math.sin(a) * 0.008]); }
+    prof.push([0.5, -0.132], [0.0, -0.132]);
+    const glass = new Geometry();
+    glass.lathe(prof, 256);
+    this.glassMesh = glass.toMesh(gl, this.glassProg);
+
+    // underside of the sand (seen when the dish is turned over)
+    const under = new Geometry();
+    under.lathe([[0.0, -0.116], [0.947, -0.116]], 128);
+    this.underMesh = under.toMesh(gl, this.solidProg);
+
+    // the side of the slab of sand
+    const side = [], sideIdx = [];
+    const NS = 512;
+    for (let i = 0; i <= NS; i++) side.push((i / NS) * TAU, 0, (i / NS) * TAU, 1);
+    for (let i = 0; i < NS; i++) { const a = i * 2; sideIdx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+    this.sideMesh = new Mesh(gl, this.sideProg, { aSide: { data: new Float32Array(side), size: 2 } }, new Uint32Array(sideIdx));
+
+    // second hand: a long needle with a row of small teeth that comb the sand (local +X = pointing direction)
+    const blade = new Geometry();
+    blade.box(-0.07, BLADE_L, 0.03, 0.037, -0.0032, 0.0032);
+    for (let k = 1; TOOTH * (k + 0.5) < BLADE_L - 0.01; k++) {
+      const x = TOOTH * (k + 0.5);
+      blade.box(x - 0.0035, x + 0.0035, -0.016, 0.031, -0.0026, 0.0026);
+    }
+    this.bladeMesh = blade.toMesh(gl, this.solidProg);
+    const minute = new Geometry(); minute.box(-0.06, 0.80, 0.056, 0.061, -0.0045, 0.0045);
+    this.minMesh = minute.toMesh(gl, this.solidProg);
+    const hour = new Geometry(); hour.box(-0.05, 0.50, 0.066, 0.074, -0.008, 0.008);
+    this.hourMesh = hour.toMesh(gl, this.solidProg);
+
+    const post = new Geometry();
+    const pp = [[0, 0.066]];
+    for (let i = 0; i <= 5; i++) { const a = Math.PI / 2 - (i / 5) * Math.PI / 2; pp.push([0.024 + Math.cos(a) * 0.006, 0.06 + Math.sin(a) * 0.006]); }
+    pp.push([0.03, -0.03]);
+    post.lathe(pp, 48);
+    post.sphere(0, 0.08, 0, 0.012, 0.006, 0.012);
+    this.postMesh = post.toMesh(gl, this.solidProg);
+
+    // grains rolling off the pile
+    const seeds = new Float32Array(4200 * 4);
+    for (let i = 0; i < seeds.length; i++) seeds[i] = Math.random();
+    this.pileMesh = new Mesh(gl, this.pileProg, { aSeed: { data: seeds, size: 4 } }, null, gl.POINTS);
+
+    // grains in the air (buffers refilled every frame)
+    this.airMesh = new Mesh(gl, this.airProg, {
+      aPos: { data: this.grains.out, size: 3 },
+      aSA: { data: this.grains.sa, size: 2 },
+    }, null, gl.POINTS, true);
+  }
+
+  uploadDial(fontFamily) {
+    const gl = this.gl, S = this.dial.size;
+    this.dial.build(fontFamily);
+    this.dialTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.dialTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, S, S, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.dial.data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+
+  resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.floor(this.canvas.clientWidth * dpr), h = Math.floor(this.canvas.clientHeight * dpr);
+    if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
+  }
+
+  setCity(i) { this.cityIndex = (i + CITIES.length) % CITIES.length; }
+
+  get level() { return -(1 - this.fill) * 0.105; }
+
+  // pouring out when upside down, refilling from the sky when upright
+  updateSand(dt, t) {
+    const tray = this.tray, up = tray.upY, M = tray.model, Mp = tray.prevModel;
+    const pourRate = 1900 * smoothstep(0.1, -0.55, up);
+    if (pourRate > 0 && this.fill > 0) {
+      this.pourAcc += pourRate * dt;
+      // when only tipped over, sand slides out over the lowest edge first
+      const g = M4.invRotDir(M, [0, -1, 0]);
+      const gLen = Math.hypot(g[0], g[2]) || 1;
+      const edgeBias = 1 - smoothstep(-0.2, -0.7, up);
+      while (this.pourAcc >= 1 && this.fill > 0) {
+        this.pourAcc -= 1;
+        const r = Math.sqrt(Math.random()) * 0.92, a = Math.random() * TAU;
+        let lx = Math.sin(a) * r, lz = -Math.cos(a) * r;
+        const b = edgeBias * Math.random();
+        lx += (g[0] / gLen * 0.9 - lx) * b;
+        lz += (g[2] / gLen * 0.9 - lz) * b;
+        const local = [lx, this.level + 0.01, lz];
+        const p = M4.apply(M, local), pp = M4.apply(Mp, local);
+        const v = [
+          (p[0] - pp[0]) / dt * 0.4 + (Math.random() - 0.5) * 0.05,
+          (p[1] - pp[1]) / dt * 0.4 - Math.random() * 0.08,
+          (p[2] - pp[2]) / dt * 0.4 + (Math.random() - 0.5) * 0.05,
+        ];
+        const kind = Math.random() < 0.22 ? 1 : 0;
+        if (this.grains.spawn(p, v, kind)) this.fill = Math.max(0, this.fill - 1 / FULL_GRAINS);
+        else break;
+      }
+    } else {
+      this.pourAcc = 0;
+    }
+
+    // upright again: the sand quietly settles back into the dish (nothing falls from the sky)
+    const upright = up > 0.9;
+    if (upright && this.fill < 1) this.fill = Math.min(1, this.fill + dt * 0.22);
+
+    // grains still in the air fade away quickly once the dish is upright
+    this.grains.update(dt, t, upright);
+  }
+
+  frame(now) {
+    const dtMs = Math.min(now - this.last, 50);
+    this.last = now;
+    const dt = Math.max(dtMs, 1) / 1000, k = dtMs / 16.667;
+    const T = this.keeper.get(CITIES[this.cityIndex].tz);
+    this.T = T;
+    const t = (now - this.t0) / 1000;
+
+    if (T.s !== this.sec.cur) { this.sec.prev = this.sec.cur; this.sec.cur = T.s; this.sec.mix = 0; }
+    this.sec.mix = Math.min(1, this.sec.mix + dt / 0.35);
+
+    this.hands.update(T, k);
+    this.tray.update(k);
+    this.camera.update(k, this.canvas.width / this.canvas.height, smoothstep(0.3, -0.5, this.tray.upY));
+    this.updateSand(dt, t);
+    this.render(t);
+  }
+
+  render(time) {
+    const gl = this.gl, cam = this.camera, M = this.tray.model, T = this.T;
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
+
+    const pattern = smoothstep(0.55, 1.0, this.fill);
+    const lightL = M4.invRotDir(M, LIGHT);
+    const eyeL = M4.applyInvRigid(M, cam.eye);
+
+    // --- sand ---
+    if (this.fill > 0.004) {
+      const sp = this.sandProg.use();
+      sp.m4('uModel', M); sp.m4('uView', cam.view); sp.m4('uProj', cam.proj);
+      sp.f('uTime', time); sp.f('uSecA', this.hands.s);
+      sp.f('uPattern', pattern); sp.f('uLevel', this.level);
+      sp.f('uHourA', this.hands.h); sp.f('uMinA', this.hands.m);
+      sp.v3('uLightL', lightL); sp.v3('uEyeL', eyeL);
+      const l = sp.loc('uCur'); if (l) gl.uniform4f(l, T.h % 12, T.m, this.sec.cur, this.sec.mix);
+      sp.f('uSecPrev', this.sec.prev);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.dialTex);
+      sp.i('uDial', 0);
+      this.sandMesh.draw();
+    }
+
+    // --- tray, blade, hands ---
+    const so = this.solidProg.use();
+    so.m4('uView', cam.view); so.m4('uProj', cam.proj);
+    so.v3('uLight', LIGHT); so.v3('uEye', cam.eye);
+    const solid = (mesh, model, color, shine, spec) => {
+      so.m4('uModel', model); so.v3('uColor', color); so.f('uShine', shine); so.f('uSpec', spec);
+      mesh.draw();
+    };
+    const INK = [0.05, 0.05, 0.055];
+    const point = a => M4.mul(M, M4.rotY(Math.PI / 2 - a));     // local +X -> clock angle a
+    if (this.fill > 0.004) solid(this.underMesh, M, [0.88, 0.875, 0.86], 10, 0.05);
+    solid(this.bladeMesh, point(this.hands.s), [0.12, 0.115, 0.11], 50, 0.3);
+    solid(this.minMesh, point(this.hands.m), INK, 50, 0.3);
+    solid(this.hourMesh, point(this.hands.h), INK, 50, 0.3);
+    solid(this.postMesh, M, INK, 50, 0.3);
+
+    if (this.fill > 0.004) {
+      const sd = this.sideProg.use();
+      sd.m4('uModel', M); sd.m4('uView', cam.view); sd.m4('uProj', cam.proj);
+      sd.f('uTime', time); sd.f('uSecA', this.hands.s);
+      sd.f('uPattern', pattern); sd.f('uLevel', this.level);
+      sd.v3('uLight', LIGHT);
+      const lc = sd.loc('uCur'); if (lc) gl.uniform4f(lc, T.h % 12, T.m, this.sec.cur, this.sec.mix);
+      sd.f('uSecPrev', this.sec.prev);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.dialTex);
+      sd.i('uDial', 0);
+      this.sideMesh.draw();
+    }
+
+    const v = cam.view;
+    const lightView = normalize3([
+      v[0] * LIGHT[0] + v[4] * LIGHT[1] + v[8] * LIGHT[2],
+      v[1] * LIGHT[0] + v[5] * LIGHT[1] + v[9] * LIGHT[2],
+      v[2] * LIGHT[0] + v[6] * LIGHT[1] + v[10] * LIGHT[2],
+    ]);
+    const px = this.canvas.height * cam.proj[5] / 2;
+
+    // --- grains on the pile ---
+    if (pattern > 0.01) {
+      const pg = this.pileProg.use();
+      pg.m4('uModel', M); pg.m4('uView', cam.view); pg.m4('uProj', cam.proj);
+      pg.f('uTime', time); pg.f('uSecA', this.hands.s);
+      pg.f('uPattern', pattern); pg.f('uLevel', this.level);
+      pg.f('uPx', px); pg.v3('uLightView', lightView);
+      this.pileMesh.draw();
+    }
+
+    // --- the glass dish ---
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    const gp = this.glassProg.use();
+    gp.m4('uModel', M); gp.m4('uView', cam.view); gp.m4('uProj', cam.proj);
+    gp.v3('uLight', LIGHT); gp.v3('uEye', cam.eye);
+    this.glassMesh.draw();
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+
+    // --- grains in the air ---
+    const n = this.grains.n;
+    if (n > 0) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      const ap = this.airProg.use();
+      ap.m4('uView', cam.view); ap.m4('uProj', cam.proj);
+      ap.f('uPx', px); ap.v3('uLightView', lightView);
+      this.airMesh.update('aPos', this.grains.out.subarray(0, n * 3));
+      this.airMesh.update('aSA', this.grains.sa.subarray(0, n * 2));
+      this.airMesh.draw(n);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
+  }
+}
+
+// ------------------------------------------------------------
+//  UI: date, place, cities
+// ------------------------------------------------------------
+function setupUI(clock) {
+  const citiesEl = document.getElementById('cities');
+  const buttons = CITIES.map((c, i) => {
+    const b = document.createElement('button');
+    b.textContent = c.name;
+    b.addEventListener('click', () => clock.setCity(i));
+    citiesEl.appendChild(b);
+    return b;
+  });
+  window.addEventListener('keydown', e => {
+    if (e.key >= '1' && e.key <= String(CITIES.length)) clock.setCity(+e.key - 1);
+    if (e.key === 'ArrowRight') clock.setCity(clock.cityIndex + 1);
+    if (e.key === 'ArrowLeft') clock.setCity(clock.cityIndex - 1);
+  });
+
+  const fadeSet = (el, text) => {
+    if (el.dataset.text === text) return;
+    if (!el.dataset.text) { el.textContent = text; el.dataset.text = text; return; }
+    el.dataset.text = text;
+    el.classList.add('out');
+    setTimeout(() => { el.textContent = el.dataset.text; el.classList.remove('out'); }, 450);
+  };
+  const dateEl = document.getElementById('date'), placeEl = document.getElementById('place');
+  const timeEl = document.getElementById('time');
+  const localName = ZONE_NAMES[LOCAL_TZ] || LOCAL_TZ.split('/').pop().replace(/_/g, ' ').toUpperCase();
+  return () => {
+    const T = clock.T; if (!T) return;
+    const c = CITIES[clock.cityIndex];
+    fadeSet(dateEl, T.date);
+    const timeText = `${pad2(T.h)} : ${pad2(T.m)} : ${pad2(T.s)}`;
+    if (timeEl.textContent !== timeText) timeEl.textContent = timeText;
+    fadeSet(placeEl, (c.name === 'LOCAL' ? `LOCAL · ${localName}` : c.name) + `   ·   ${T.offset}`);
+    buttons.forEach((b, i) => b.classList.toggle('on', i === clock.cityIndex));
+  };
+}
+
+// ------------------------------------------------------------
+//  Start
+// ------------------------------------------------------------
+async function start() {
+  let clock;
+  try {
+    clock = new SandClock(document.getElementById('scene'));
+  } catch (e) {
+    console.error(e);
+    document.getElementById('nogl').style.display = 'flex';
+    return;
+  }
+  try {
+    await Promise.race([document.fonts.load('600 64px "Cormorant Garamond"'), new Promise(r => setTimeout(r, 2500))]);
+  } catch (e) { /* fall back to Georgia */ }
+  clock.uploadDial('"Cormorant Garamond", Georgia, serif');
+  const updateUI = setupUI(clock);
+  window.sandClock = clock;
+
+  let frameNo = 0;
+  const loop = now => {
+    clock.frame(now);
+    if (++frameNo % 4 === 0) updateUI();
+    requestAnimationFrame(loop);
+  };
+  updateUI();
+  requestAnimationFrame(loop);
+}
+start();
+
+</script>
+</body>
+</html>
