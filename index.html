@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Sand Clock</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -906,18 +906,54 @@ class TrayControl {
     this.model = M4.translate(0, 0, 0);
     this.prevModel = this.model;
 
+    // one finger / mouse turns the tray; two fingers pinch to zoom (phones and tablets)
+    this.pointers = new Map();
+    this.onPinch = null;             // set by SandClock: called with (previous distance / new distance)
+    this.lastTap = 0;
+    const pinchDist = () => {
+      const [a, b] = [...this.pointers.values()];
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    };
     canvas.addEventListener('pointerdown', e => {
-      this.dragging = true; this.lx = e.clientX; this.ly = e.clientY;
-      canvas.setPointerCapture(e.pointerId); canvas.classList.add('dragging');
+      canvas.setPointerCapture(e.pointerId);
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.pointers.size === 1) {
+        this.dragging = true; this.lx = e.clientX; this.ly = e.clientY;
+        canvas.classList.add('dragging');
+        // double-tap on a phone = double-click: set the tray back
+        if (e.pointerType === 'touch') {
+          if (e.timeStamp - this.lastTap < 300) this.reset();
+          this.lastTap = e.timeStamp;
+        }
+      } else if (this.pointers.size === 2) {
+        this.dragging = false;          // stop turning while pinching
+        this.pinchLast = pinchDist();
+      }
     });
     canvas.addEventListener('pointermove', e => {
+      if (!this.pointers.has(e.pointerId)) return;
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.pointers.size >= 2) {
+        const d = pinchDist();
+        if (this.pinchLast > 0 && d > 0 && this.onPinch) this.onPinch(this.pinchLast / d);
+        this.pinchLast = d;
+        return;
+      }
       if (!this.dragging) return;
       const dx = e.clientX - this.lx, dy = e.clientY - this.ly;
       this.lx = e.clientX; this.ly = e.clientY;
       this.goal.yaw -= dx * 0.006;
       this.goal.pitch += dy * 0.006;
     });
-    const end = () => { this.dragging = false; canvas.classList.remove('dragging'); };
+    const end = e => {
+      this.pointers.delete(e.pointerId);
+      if (this.pointers.size === 1) {          // one finger left after a pinch: carry on turning from here
+        const [p] = [...this.pointers.values()];
+        this.dragging = true; this.lx = p.x; this.ly = p.y;
+      } else if (this.pointers.size === 0) {
+        this.dragging = false; canvas.classList.remove('dragging');
+      }
+    };
     canvas.addEventListener('pointerup', end);
     canvas.addEventListener('pointercancel', end);
     canvas.addEventListener('dblclick', () => this.reset());
@@ -986,6 +1022,9 @@ class SandClock {
     this.hands = new Hands();
     this.camera = new Camera(canvas);
     this.tray = new TrayControl(canvas);
+    this.tray.onPinch = ratio => {
+      this.camera.goal.zoom = clamp(this.camera.goal.zoom * ratio, 0.45, 2.4);
+    };
     this.grains = new GrainField(26000);
     this.fill = 1;            // how much sand is in the tray (0..1)
     this.pourAcc = 0;
